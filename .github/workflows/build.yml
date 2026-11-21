@@ -1,0 +1,177 @@
+name: Build modulo
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Criar projeto
+        run: |
+          mkdir -p app/src/main/java/ipad/mod app/src/main/assets
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven("https://api.xposed.info/")
+              }
+          }
+          rootProject.name = "IPadPlayer"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "ipad.mod"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "ipad.mod"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              compileOnly("de.robv.android.xposed:api:82")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="iPad Player"
+                  android:allowBackup="false">
+                  <meta-data android:name="xposedmodule" android:value="true" />
+                  <meta-data android:name="xposeddescription" android:value="Player em duas metades (paisagem)" />
+                  <meta-data android:name="xposedminversion" android:value="93" />
+              </application>
+          </manifest>
+          EOF
+
+          echo "ipad.mod.Hook" > app/src/main/assets/xposed_init
+
+          cat > app/src/main/java/ipad/mod/Hook.kt <<'EOF'
+          package ipad.mod
+
+          import android.content.res.Configuration
+          import android.view.View
+          import android.view.ViewGroup
+          import de.robv.android.xposed.IXposedHookLoadPackage
+          import de.robv.android.xposed.XC_MethodHook
+          import de.robv.android.xposed.XposedBridge
+          import de.robv.android.xposed.XposedHelpers
+          import de.robv.android.xposed.callbacks.XC_LoadPackage
+          import java.util.WeakHashMap
+
+          class Hook : IXposedHookLoadPackage {
+
+              private val roots = WeakHashMap<View, Boolean>()
+              private val parents = WeakHashMap<View, Boolean>()
+
+              override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
+                  if (lpparam.packageName != "com.apple.android.music") return
+                  try {
+                      // q8.na = binding do music_player (layout-w600dp) na versao 7.1
+                      XposedHelpers.findAndHookConstructor(
+                          "q8.na", lpparam.classLoader,
+                          "androidx.databinding.f", View::class.java,
+                          object : XC_MethodHook() {
+                              override fun afterHookedMethod(param: MethodHookParam) {
+                                  try {
+                                      setup(param.args[1] as View)
+                                  } catch (t: Throwable) {
+                                      XposedBridge.log("ipad.mod setup erro: $t")
+                                  }
+                              }
+                          })
+                      XposedBridge.log("ipad.mod: hook instalado")
+                  } catch (t: Throwable) {
+                      XposedBridge.log("ipad.mod: falha ao hookar q8.na: $t")
+                  }
+              }
+
+              private fun setup(root: View) {
+                  if (roots.put(root, true) != null) return
+                  XposedBridge.log("ipad.mod: player inflado")
+                  root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                      override fun onViewAttachedToWindow(v: View) = watch(v)
+                      override fun onViewDetachedFromWindow(v: View) {}
+                  })
+                  if (root.parent != null) watch(root)
+              }
+
+              private fun watch(root: View) {
+                  val parent = root.parent as? View ?: return
+                  if (parents.put(parent, true) == null) {
+                      parent.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> adjust(root) }
+                  }
+                  adjust(root)
+              }
+
+              private fun adjust(root: View) {
+                  val parent = root.parent as? View ?: return
+                  val lp = root.layoutParams ?: return
+                  val cfg = root.resources.configuration
+                  val land = cfg.orientation == Configuration.ORIENTATION_LANDSCAPE
+                  val wide = cfg.smallestScreenWidthDp >= 600
+                  val target = if (land && wide && parent.width > 0) parent.width / 2
+                               else ViewGroup.LayoutParams.MATCH_PARENT
+                  if (lp.width != target) {
+                      lp.width = target
+                      root.layoutParams = lp
+                      XposedBridge.log("ipad.mod: largura do player = $target")
+                  }
+              }
+          }
+          EOF
+
+      - name: Compilar
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: modulo-ipad
+          path: app/build/outputs/apk/debug/app-debug.apk
