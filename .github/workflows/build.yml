@@ -104,12 +104,22 @@ jobs:
           import de.robv.android.xposed.XposedBridge
           import de.robv.android.xposed.XposedHelpers
           import de.robv.android.xposed.callbacks.XC_LoadPackage
+          import java.lang.ref.WeakReference
           import java.util.WeakHashMap
 
           class Hook : IXposedHookLoadPackage {
 
               private val roots = WeakHashMap<View, Boolean>()
               private val watched = WeakHashMap<View, View>()
+              private val tokens = WeakHashMap<View, Int>()
+              private var playerRef: WeakReference<View>? = null
+
+              // ids do player (versao 7.1): capa, titulo, progresso e controles
+              private val playerIds = intArrayOf(
+                  0x7F0A0118, 0x7F0A0407, 0x7F0A011D, 0x7F0A0345, 0x7F0A0700,
+                  0x7F0A06FB, 0x7F0A026D, 0x7F0A09A1, 0x7F0A0718, 0x7F0A08B6,
+                  0x7F0A08EC, 0x7F0A083E, 0x7F0A08C1, 0x7F0A08C3
+              )
 
               override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
                   if (lpparam.packageName != "com.apple.android.music") return
@@ -140,11 +150,18 @@ jobs:
 
               private fun setup(root: View, right: Boolean) {
                   if (roots.put(root, true) != null) return
+                  if (!right) playerRef = WeakReference(root)
                   root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-                      override fun onViewAttachedToWindow(v: View) = watch(v, right)
+                      override fun onViewAttachedToWindow(v: View) {
+                          watch(v, right)
+                          if (right) startTick(v)
+                      }
                       override fun onViewDetachedFromWindow(v: View) {}
                   })
-                  if (root.parent != null) watch(root, right)
+                  if (root.parent != null) {
+                      watch(root, right)
+                      if (right && root.isAttachedToWindow) startTick(root)
+                  }
               }
 
               private fun watch(root: View, right: Boolean) {
@@ -156,20 +173,57 @@ jobs:
                   adjust(root, right)
               }
 
+              private fun isWide(v: View): Boolean {
+                  val cfg = v.resources.configuration
+                  return cfg.orientation == Configuration.ORIENTATION_LANDSCAPE && cfg.smallestScreenWidthDp >= 600
+              }
+
               private fun adjust(root: View, right: Boolean) {
                   val parent = root.parent as? View ?: return
                   val lp = root.layoutParams ?: return
-                  val cfg = root.resources.configuration
-                  val on = cfg.orientation == Configuration.ORIENTATION_LANDSCAPE &&
-                          cfg.smallestScreenWidthDp >= 600 && parent.width > 0
+                  val on = isWide(root) && parent.width > 0
                   val w = if (on) parent.width / 2 else ViewGroup.LayoutParams.MATCH_PARENT
                   val tx = if (on && right) (parent.width - w).toFloat() else 0f
                   if (lp.width != w) {
                       lp.width = w
                       root.layoutParams = lp
-                      XposedBridge.log("ipad.mod: largura = $w (direita=$right)")
                   }
                   if (root.translationX != tx) root.translationX = tx
+              }
+
+              // Enquanto a letra esta na tela, forca o player a continuar visivel
+              private fun startTick(lyrics: View) {
+                  val t = (tokens[lyrics] ?: 0) + 1
+                  tokens[lyrics] = t
+                  tick(lyrics, t)
+              }
+
+              private fun tick(lyrics: View, t: Int) {
+                  if (tokens[lyrics] != t || !lyrics.isAttachedToWindow) return
+                  try {
+                      restorePlayer()
+                  } catch (e: Throwable) {
+                  }
+                  lyrics.postOnAnimation { tick(lyrics, t) }
+              }
+
+              private fun restorePlayer() {
+                  val p = playerRef?.get() ?: return
+                  if (!isWide(p)) return
+                  show(p)
+                  for (id in playerIds) {
+                      val v = p.findViewById<View>(id)
+                      if (v != null) show(v)
+                  }
+              }
+
+              private fun show(v: View) {
+                  if (v.visibility != View.VISIBLE) v.visibility = View.VISIBLE
+                  if (v.alpha != 1f) v.alpha = 1f
+                  if (v.translationX != 0f) v.translationX = 0f
+                  if (v.translationY != 0f) v.translationY = 0f
+                  if (v.scaleX != 1f) v.scaleX = 1f
+                  if (v.scaleY != 1f) v.scaleY = 1f
               }
           }
           EOF
